@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+openai-whisper
+rapidfuzz
+speechbrain
+huggingface_hub>=0.20.0
+soundfile
+torch
+torchaudio
