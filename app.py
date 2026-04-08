@@ -39,7 +39,6 @@ async def verify(
     minDurationSeconds: str = Form(default="3"),
     minTranscriptSimilarity: str = Form(default="85"),
 ):
-    del expectedText
     del expectedGender
     del minDurationSeconds
 
@@ -64,6 +63,8 @@ async def verify(
                 str(audio_path),
                 "--language",
                 primaryLanguage,
+                "--expected-text",
+                expectedText,
                 "--threshold",
                 str(minTranscriptSimilarity),
             ],

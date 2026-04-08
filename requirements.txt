@@ -1,10 +1,12 @@
 fastapi
 uvicorn[standard]
 python-multipart
-openai-whisper
+openai
 rapidfuzz
-speechbrain
-huggingface_hub>=0.20.0
-soundfile
-torch
-torchaudio
+# Legacy local-model stack kept for later use in verify_partner_voice_legacy.py:
+# openai-whisper
+# speechbrain
+# huggingface_hub>=0.20.0
+# soundfile
+# torch
+# torchaudio

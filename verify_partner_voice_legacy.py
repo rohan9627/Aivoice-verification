@@ -3,9 +3,20 @@ import argparse
 import json
 import os
 import sys
+from statistics import median
 
-from openai import OpenAI
+import torch
+import torchaudio
 from rapidfuzz import fuzz
+import whisper
+
+if not hasattr(torchaudio, "list_audio_backends"):
+    def _list_audio_backends_fallback():
+        return []
+
+    torchaudio.list_audio_backends = _list_audio_backends_fallback  # type: ignore[attr-defined]
+
+from speechbrain.inference.classifiers import EncoderClassifier
 
 
 EXPECTED_TEXT_BY_LANGUAGE = {
@@ -19,88 +30,62 @@ EXPECTED_TEXT_BY_LANGUAGE = {
     "Punjabi": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ ਦੋਸਤੀ ਬਹੁਤ ਖਾਸ ਹੁੰਦੀ ਹੈ ਚੰਗੇ ਦੋਸਤ ਹਮੇਸ਼ਾਂ ਨਾਲ ਖੜ੍ਹੇ ਰਹਿੰਦੇ ਹਨ ਦੋਸਤ ਖੁਸ਼ੀ ਵਧਾਉਂਦੇ ਹਨ ਅਤੇ ਦੁੱਖ ਘਟਾਉਂਦੇ ਹਨ ਉਨ੍ਹਾਂ ਤੋਂ ਬਿਨਾਂ ਜ਼ਿੰਦਗੀ ਅਧੂਰੀ ਲੱਗਦੀ ਹੈ ਧੰਨਵਾਦ",
 }
 
-LANGUAGE_CODE_BY_LANGUAGE = {
-    "Hindi": "hi",
-    "Telugu": "te",
-    "Bangla": "bn",
-    "Tamil": "ta",
-    "Kannada": "kn",
-    "Malayalam": "ml",
-    "Marathi": "mr",
-    "Punjabi": "pa",
-}
-
 
 def normalize_text(value: str) -> str:
     return " ".join((value or "").strip().lower().split())
 
 
-def get_expected_text(primary_language: str, expected_text: str):
-    cleaned = (expected_text or "").strip()
-    if cleaned:
-        return cleaned
-    return EXPECTED_TEXT_BY_LANGUAGE.get(primary_language, EXPECTED_TEXT_BY_LANGUAGE["Hindi"])
-
-
-def transcribe_audio(audio_path: str, primary_language: str, expected_text: str):
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-
-    client = OpenAI(api_key=api_key)
-    expected = get_expected_text(primary_language, expected_text)
-    model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
-
-    with open(audio_path, "rb") as audio_file:
-        transcription = client.audio.transcriptions.create(
-            model=model,
-            file=audio_file,
-            language=LANGUAGE_CODE_BY_LANGUAGE.get(primary_language),
-            response_format="json",
-            prompt=expected,
-        )
-
-    transcript = (getattr(transcription, "text", None) or "").strip()
-    usage = getattr(transcription, "usage", None)
-    duration_seconds = 0.0
-    if usage is not None:
-        duration_seconds = float(
-            getattr(usage, "seconds", 0)
-            or (usage.get("seconds", 0) if isinstance(usage, dict) else 0)
-        )
-
-    return transcript, expected, duration_seconds, model
-
-
-def verify_sentence(audio_path: str, primary_language: str, expected_text: str, threshold: int):
-    transcript, expected, duration_seconds, model = transcribe_audio(
-        audio_path, primary_language, expected_text
-    )
+def verify_sentence(audio_path: str, primary_language: str, threshold: int):
+    model = whisper.load_model("small")
+    transcript = model.transcribe(audio_path).get("text", "").strip()
+    expected = EXPECTED_TEXT_BY_LANGUAGE.get(primary_language, EXPECTED_TEXT_BY_LANGUAGE["Hindi"])
     score = fuzz.token_set_ratio(normalize_text(transcript), normalize_text(expected))
-    sentence_passed = score >= threshold
+    return {
+        "sentencePassed": score >= threshold,
+        "sentenceScore": float(score),
+        "sentenceThreshold": float(threshold),
+        "transcript": transcript,
+        "expectedText": expected,
+    }
+
+
+def verify_gender_female(audio_path: str):
+    classifier = EncoderClassifier.from_hparams(
+        source="speechbrain/spkrec-ecapa-voxceleb",
+        savedir=os.path.join("/tmp", "sb_spkrec_ecapa_voxceleb"),
+    )
+
+    signal, sample_rate = torchaudio.load(audio_path)
+    if signal.shape[0] > 1:
+        signal = torch.mean(signal, dim=0, keepdim=True)
+    if sample_rate != 16000:
+        signal = torchaudio.functional.resample(signal, sample_rate, 16000)
+        sample_rate = 16000
+
+    _ = classifier.encode_batch(signal)
+
+    pitch = torchaudio.functional.detect_pitch_frequency(signal, sample_rate=sample_rate)
+    pitch_values = pitch[pitch > 0].flatten().tolist()
+    if not pitch_values:
+        return {
+            "genderPassed": False,
+            "genderConfidence": 0.0,
+            "detectedGender": "UNKNOWN",
+            "reasons": ["Could not detect clear voice pitch from audio."],
+        }
+
+    med_pitch = float(median(pitch_values))
+    female_threshold_hz = float(os.getenv("VOICE_FEMALE_PITCH_THRESHOLD_HZ", "165"))
+    confidence = min(abs(med_pitch - female_threshold_hz) / 120.0, 1.0)
+    is_female = med_pitch >= female_threshold_hz
 
     return {
-        "verified": sentence_passed,
-        "reason": (
-            "Speech verification passed"
-            if sentence_passed
-            else "Spoken sentence did not match the expected script"
-        ),
-        "metrics": {
-            "durationSeconds": duration_seconds,
-            "transcript": transcript,
-            "transcriptSimilarity": float(score),
-            "predictedGender": "UNKNOWN",
-            "modelPredictedGender": "UNKNOWN",
-            "modelPredictedGenderLabel": None,
-            "modelPredictedGenderConfidence": None,
-            "modelError": "Gender verification disabled while OpenAI transcription mode is active",
-            "pitchPredictedGender": "UNKNOWN",
-            "pitchHz": None,
-            "speechbrainEmbeddingAvailable": False,
-            "speechbrainEmbeddingNorm": None,
-            "transcriptionModel": model,
-        },
+        "genderPassed": bool(is_female),
+        "genderConfidence": float(confidence),
+        "detectedGender": "FEMALE" if is_female else "MALE",
+        "reasons": []
+        if is_female
+        else [f"Detected voice pitch suggests non-female voice (median {med_pitch:.1f}Hz)."],
     }
 
 
@@ -108,12 +93,18 @@ def main():
     parser = argparse.ArgumentParser(description="Partner voice verification")
     parser.add_argument("--audio", required=True)
     parser.add_argument("--language", required=True)
-    parser.add_argument("--expected-text", required=False, default="")
     parser.add_argument("--threshold", required=False, default="85")
     args = parser.parse_args()
 
     threshold = int(float(args.threshold))
-    output = verify_sentence(args.audio, args.language, args.expected_text, threshold)
+
+    sentence_result = verify_sentence(args.audio, args.language, threshold)
+    gender_result = verify_gender_female(args.audio)
+
+    output = {
+        **sentence_result,
+        **gender_result,
+    }
     print(json.dumps(output, ensure_ascii=False))
 
 
