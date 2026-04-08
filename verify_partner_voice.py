@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import mimetypes
+import time
 
 from google import genai
 from google.genai import types
@@ -44,6 +45,19 @@ def get_expected_text(primary_language: str, expected_text: str):
     return EXPECTED_TEXT_BY_LANGUAGE.get(primary_language, EXPECTED_TEXT_BY_LANGUAGE["Hindi"])
 
 
+def should_retry_gemini_error(error: Exception):
+    message = str(error).lower()
+    transient_markers = [
+        "503",
+        "unavailable",
+        "high demand",
+        "try again later",
+        "resource exhausted",
+        "temporarily unavailable",
+    ]
+    return any(marker in message for marker in transient_markers)
+
+
 def transcribe_audio(audio_path: str, primary_language: str, expected_text: str):
     api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     if not api_key:
@@ -59,19 +73,35 @@ def transcribe_audio(audio_path: str, primary_language: str, expected_text: str)
         f"Primary language: {primary_language}. "
         f"Expected verification sentence for reference: {expected}"
     )
+    max_retries = max(0, int(os.getenv("GEMINI_MAX_RETRIES", "3")))
+    retry_delay_seconds = max(1.0, float(os.getenv("GEMINI_RETRY_DELAY_SECONDS", "2")))
 
     with open(audio_path, "rb") as audio_file:
         audio_bytes = audio_file.read()
-        response = client.models.generate_content(
-            model=model,
-            contents=[
-                prompt,
-                types.Part.from_bytes(
-                    data=audio_bytes,
-                    mime_type=mime_type,
-                ),
-            ],
-        )
+        response = None
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        prompt,
+                        types.Part.from_bytes(
+                            data=audio_bytes,
+                            mime_type=mime_type,
+                        ),
+                    ],
+                )
+                break
+            except Exception as error:
+                last_error = error
+                if attempt >= max_retries or not should_retry_gemini_error(error):
+                    raise
+                time.sleep(retry_delay_seconds * (attempt + 1))
+
+        if response is None and last_error is not None:
+            raise last_error
 
     transcript = (getattr(response, "text", None) or "").strip()
     usage = getattr(response, "usage_metadata", None)
