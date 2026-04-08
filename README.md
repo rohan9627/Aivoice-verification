@@ -10,8 +10,9 @@ How it works:
 
 1. [app.py](./app.py) receives the uploaded audio on `POST /verify`
 2. [verify_partner_voice.py](./verify_partner_voice.py) sends the audio to Gemini 2.5 Flash
-3. the returned transcript is compared against the expected verification sentence using `rapidfuzz`
-4. verification passes when the transcript similarity reaches the configured threshold
+3. Gemini returns both a transcript and a lightweight perceived voice gender classification
+4. the transcript is compared against the expected verification sentence using `rapidfuzz`
+5. verification passes only when both the sentence similarity and expected gender check pass
 
 Current model:
 
@@ -20,7 +21,7 @@ Current model:
 Current behavior:
 
 - transcript verification is active
-- gender verification is temporarily disabled in this mode
+- lightweight Gemini-based perceived gender blocking is active
 - the previous local AI stack is preserved in [verify_partner_voice_legacy.py](./verify_partner_voice_legacy.py)
 - the old heavy dependencies are commented out in [requirements.txt](./requirements.txt)
 

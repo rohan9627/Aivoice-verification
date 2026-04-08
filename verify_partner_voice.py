@@ -5,6 +5,7 @@ import os
 import sys
 import mimetypes
 import time
+import re
 
 from google import genai
 from google.genai import types
@@ -45,6 +46,14 @@ def get_expected_text(primary_language: str, expected_text: str):
     return EXPECTED_TEXT_BY_LANGUAGE.get(primary_language, EXPECTED_TEXT_BY_LANGUAGE["Hindi"])
 
 
+def extract_json_payload(value: str):
+    cleaned = value.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned)
+
+
 def should_retry_gemini_error(error: Exception):
     message = str(error).lower()
     transient_markers = [
@@ -68,8 +77,12 @@ def transcribe_audio(audio_path: str, primary_language: str, expected_text: str)
     model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     mime_type = mimetypes.guess_type(audio_path)[0] or "audio/mp4"
     prompt = (
-        "Generate a transcript of the speech only. "
-        "Return only the spoken transcript text with no explanation. "
+        "Analyze the attached voice recording. "
+        "Return only valid JSON with exactly these keys: "
+        'transcript, perceived_gender, gender_confidence. '
+        'The value for perceived_gender must be one of "MALE", "FEMALE", or "UNKNOWN". '
+        "gender_confidence must be a number between 0 and 1. "
+        "Do not include markdown or explanation. "
         f"Primary language: {primary_language}. "
         f"Expected verification sentence for reference: {expected}"
     )
@@ -103,39 +116,62 @@ def transcribe_audio(audio_path: str, primary_language: str, expected_text: str)
         if response is None and last_error is not None:
             raise last_error
 
-    transcript = (getattr(response, "text", None) or "").strip()
-    usage = getattr(response, "usage_metadata", None)
+    raw_text = (getattr(response, "text", None) or "").strip()
     duration_seconds = 0.0
-    if transcript == "":
-        raise RuntimeError("Gemini returned an empty transcription")
+    if raw_text == "":
+        raise RuntimeError("Gemini returned an empty response")
 
-    return transcript, expected, duration_seconds, model
+    parsed = extract_json_payload(raw_text)
+    transcript = str(parsed.get("transcript", "")).strip()
+    perceived_gender = str(parsed.get("perceived_gender", "UNKNOWN")).strip().upper()
+    if perceived_gender not in {"MALE", "FEMALE", "UNKNOWN"}:
+        perceived_gender = "UNKNOWN"
+
+    gender_confidence = parsed.get("gender_confidence", 0)
+    try:
+        gender_confidence = float(gender_confidence)
+    except (TypeError, ValueError):
+        gender_confidence = 0.0
+
+    return transcript, expected, duration_seconds, model, perceived_gender, gender_confidence
 
 
-def verify_sentence(audio_path: str, primary_language: str, expected_text: str, threshold: int):
-    transcript, expected, duration_seconds, model = transcribe_audio(
+def verify_sentence(
+    audio_path: str,
+    primary_language: str,
+    expected_text: str,
+    expected_gender: str,
+    threshold: int,
+):
+    transcript, expected, duration_seconds, model, perceived_gender, gender_confidence = transcribe_audio(
         audio_path, primary_language, expected_text
     )
     score = fuzz.token_set_ratio(normalize_text(transcript), normalize_text(expected))
     sentence_passed = score >= threshold
+    gender_matched = perceived_gender == expected_gender
+
+    if sentence_passed and gender_matched:
+        reason = "Speech verification passed"
+    elif not sentence_passed and not gender_matched:
+        reason = "Spoken sentence did not match and detected voice did not match the expected gender"
+    elif not sentence_passed:
+        reason = "Spoken sentence did not match the expected script"
+    else:
+        reason = "Detected voice did not match the expected gender"
 
     return {
-        "verified": sentence_passed,
-        "reason": (
-            "Speech verification passed"
-            if sentence_passed
-            else "Spoken sentence did not match the expected script"
-        ),
+        "verified": sentence_passed and gender_matched,
+        "reason": reason,
         "metrics": {
             "durationSeconds": duration_seconds,
             "transcript": transcript,
             "transcriptSimilarity": float(score),
-            "predictedGender": "UNKNOWN",
-            "modelPredictedGender": "UNKNOWN",
-            "modelPredictedGenderLabel": None,
-            "modelPredictedGenderConfidence": None,
-            "modelError": "Gender verification disabled while Gemini transcription mode is active",
-            "pitchPredictedGender": "UNKNOWN",
+            "predictedGender": perceived_gender,
+            "modelPredictedGender": perceived_gender,
+            "modelPredictedGenderLabel": perceived_gender,
+            "modelPredictedGenderConfidence": gender_confidence,
+            "modelError": None,
+            "pitchPredictedGender": perceived_gender,
             "pitchHz": None,
             "speechbrainEmbeddingAvailable": False,
             "speechbrainEmbeddingNorm": None,
@@ -149,11 +185,18 @@ def main():
     parser.add_argument("--audio", required=True)
     parser.add_argument("--language", required=True)
     parser.add_argument("--expected-text", required=False, default="")
+    parser.add_argument("--expected-gender", required=False, default="FEMALE")
     parser.add_argument("--threshold", required=False, default="85")
     args = parser.parse_args()
 
     threshold = int(float(args.threshold))
-    output = verify_sentence(args.audio, args.language, args.expected_text, threshold)
+    output = verify_sentence(
+        args.audio,
+        args.language,
+        args.expected_text,
+        args.expected_gender.strip().upper(),
+        threshold,
+    )
     print(json.dumps(output, ensure_ascii=False))
 
 

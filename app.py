@@ -39,7 +39,6 @@ async def verify(
     minDurationSeconds: str = Form(default="3"),
     minTranscriptSimilarity: str = Form(default="85"),
 ):
-    del expectedGender
     del minDurationSeconds
 
     require_auth(authorization)
@@ -65,6 +64,8 @@ async def verify(
                 primaryLanguage,
                 "--expected-text",
                 expectedText,
+                "--expected-gender",
+                expectedGender,
                 "--threshold",
                 str(minTranscriptSimilarity),
             ],
