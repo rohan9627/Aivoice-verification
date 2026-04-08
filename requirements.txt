@@ -1,7 +1,7 @@
 fastapi
 uvicorn[standard]
 python-multipart
-openai
+google-genai
 rapidfuzz
 # Legacy local-model stack kept for later use in verify_partner_voice_legacy.py:
 # openai-whisper

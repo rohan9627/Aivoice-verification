@@ -3,8 +3,10 @@ import argparse
 import json
 import os
 import sys
+import mimetypes
 
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from rapidfuzz import fuzz
 
 
@@ -43,31 +45,39 @@ def get_expected_text(primary_language: str, expected_text: str):
 
 
 def transcribe_audio(audio_path: str, primary_language: str, expected_text: str):
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY is not configured")
 
-    client = OpenAI(api_key=api_key)
+    client = genai.Client(api_key=api_key)
     expected = get_expected_text(primary_language, expected_text)
-    model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    mime_type = mimetypes.guess_type(audio_path)[0] or "audio/mp4"
+    prompt = (
+        "Generate a transcript of the speech only. "
+        "Return only the spoken transcript text with no explanation. "
+        f"Primary language: {primary_language}. "
+        f"Expected verification sentence for reference: {expected}"
+    )
 
     with open(audio_path, "rb") as audio_file:
-        transcription = client.audio.transcriptions.create(
+        audio_bytes = audio_file.read()
+        response = client.models.generate_content(
             model=model,
-            file=audio_file,
-            language=LANGUAGE_CODE_BY_LANGUAGE.get(primary_language),
-            response_format="json",
-            prompt=expected,
+            contents=[
+                prompt,
+                types.Part.from_bytes(
+                    data=audio_bytes,
+                    mime_type=mime_type,
+                ),
+            ],
         )
 
-    transcript = (getattr(transcription, "text", None) or "").strip()
-    usage = getattr(transcription, "usage", None)
+    transcript = (getattr(response, "text", None) or "").strip()
+    usage = getattr(response, "usage_metadata", None)
     duration_seconds = 0.0
-    if usage is not None:
-        duration_seconds = float(
-            getattr(usage, "seconds", 0)
-            or (usage.get("seconds", 0) if isinstance(usage, dict) else 0)
-        )
+    if transcript == "":
+        raise RuntimeError("Gemini returned an empty transcription")
 
     return transcript, expected, duration_seconds, model
 
@@ -94,7 +104,7 @@ def verify_sentence(audio_path: str, primary_language: str, expected_text: str, 
             "modelPredictedGender": "UNKNOWN",
             "modelPredictedGenderLabel": None,
             "modelPredictedGenderConfidence": None,
-            "modelError": "Gender verification disabled while OpenAI transcription mode is active",
+            "modelError": "Gender verification disabled while Gemini transcription mode is active",
             "pitchPredictedGender": "UNKNOWN",
             "pitchHz": None,
             "speechbrainEmbeddingAvailable": False,

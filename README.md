@@ -4,18 +4,18 @@ Standalone Python microservice for partner voice verification.
 
 ## Current AI verification mode
 
-The service currently uses OpenAI speech-to-text for verification.
+The service currently uses Gemini 2.5 Flash for transcript-based verification.
 
 How it works:
 
 1. [app.py](./app.py) receives the uploaded audio on `POST /verify`
-2. [verify_partner_voice.py](./verify_partner_voice.py) sends the audio to OpenAI transcription
+2. [verify_partner_voice.py](./verify_partner_voice.py) sends the audio to Gemini 2.5 Flash
 3. the returned transcript is compared against the expected verification sentence using `rapidfuzz`
 4. verification passes when the transcript similarity reaches the configured threshold
 
 Current model:
 
-- `gpt-4o-mini-transcribe` by default
+- `gemini-2.5-flash` by default
 
 Current behavior:
 
@@ -38,8 +38,8 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 Optional:
 
 ```bash
-OPENAI_API_KEY=your-openai-api-key
-OPENAI_TRANSCRIBE_MODEL=gpt-4o-mini-transcribe
+GEMINI_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-2.5-flash
 VOICE_VERIFICATION_SERVICE_TOKEN=your-shared-secret
 VOICE_FEMALE_PITCH_THRESHOLD_HZ=165
 ```
